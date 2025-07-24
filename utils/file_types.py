@@ -79,7 +79,7 @@ TEXT_DATA = {
     ".csv",  # CSV
     ".tsv",  # TSV
     ".gitignore",  # Git ignore
-    ".dockerfile",  # Dockerfile
+    ".dockerfile",  # Docker
     ".makefile",  # Make
     ".cmake",  # CMake
     ".gradle",  # Gradle
@@ -221,7 +221,7 @@ TOKEN_ESTIMATION_RATIOS = {
     # Logs and data
     ".log": 4.5,  # Log files - timestamps, messages, stack traces
     ".csv": 3.1,  # CSV - data with delimiters
-    # Infrastructure files
+    # Docker and infrastructure
     ".dockerfile": 3.7,  # Dockerfile - commands and paths
     ".tf": 3.5,  # Terraform - infrastructure as code
 }

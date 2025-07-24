@@ -28,7 +28,6 @@ from utils.conversation_memory import (
 )
 
 
-@pytest.mark.no_mock_provider
 class TestImageSupportIntegration:
     """Integration tests for the complete image support feature."""
 
@@ -81,11 +80,11 @@ class TestImageSupportIntegration:
         expected = ["shared.png", "new_diagram.png", "middle.png", "old_diagram.png"]
         assert image_list == expected
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_add_turn_with_images(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_add_turn_with_images(self, mock_redis):
         """Test adding a conversation turn with images."""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         # Mock the Redis operations to return success
         mock_client.set.return_value = True
@@ -164,7 +163,7 @@ class TestImageSupportIntegration:
         images_field = schema["properties"]["images"]
         assert images_field["type"] == "array"
         assert images_field["items"]["type"] == "string"
-        assert "screenshots" in images_field["description"].lower()
+        assert "error screens" in images_field["description"].lower()
 
     def test_tool_image_validation_limits(self):
         """Test that tools validate image size limits using real provider resolution."""
@@ -179,12 +178,12 @@ class TestImageSupportIntegration:
                 small_images.append(temp_file.name)
 
         try:
-            # Test with an invalid model name that doesn't exist in any provider
-            result = tool._validate_image_limits(small_images, "non-existent-model-12345")
-            # Should return error because model not available or doesn't support images
+            # Test with a model that should fail (no provider available in test environment)
+            result = tool._validate_image_limits(small_images, "mistral-large")
+            # Should return error because model not available
             assert result is not None
             assert result["status"] == "error"
-            assert "is not available" in result["content"] or "does not support image processing" in result["content"]
+            assert "does not support image processing" in result["content"]
 
             # Test that empty/None images always pass regardless of model
             result = tool._validate_image_limits([], "any-model")
@@ -201,33 +200,56 @@ class TestImageSupportIntegration:
 
     def test_image_validation_model_specific_limits(self):
         """Test that different models have appropriate size limits using real provider resolution."""
+        import importlib
+
         tool = ChatTool()
 
-        # Test with Gemini model which has better image support in test environment
-        # Create 15MB image (under default limits)
+        # Test OpenAI O3 model (20MB limit) - Create 15MB image (should pass)
         small_image_path = None
         large_image_path = None
 
+        # Save original environment
+        original_env = {
+            "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY"),
+            "DEFAULT_MODEL": os.environ.get("DEFAULT_MODEL"),
+        }
+
         try:
-            # Create 15MB image
+            # Create 15MB image (under 20MB O3 limit)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
                 temp_file.write(b"\x00" * (15 * 1024 * 1024))  # 15MB
                 small_image_path = temp_file.name
 
-            # Test with the default model from test environment (gemini-2.5-flash)
-            result = tool._validate_image_limits([small_image_path], "gemini-2.5-flash")
-            assert result is None  # Should pass for Gemini models
+            # Set up environment for OpenAI provider
+            os.environ["OPENAI_API_KEY"] = "test-key-o3-validation-test-not-real"
+            os.environ["DEFAULT_MODEL"] = "o3"
 
-            # Create 150MB image (over typical limits)
+            # Clear other provider keys to isolate to OpenAI
+            for key in ["GEMINI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY"]:
+                os.environ.pop(key, None)
+
+            # Reload config and clear registry
+            import config
+
+            importlib.reload(config)
+            from providers.registry import ModelProviderRegistry
+
+            ModelProviderRegistry._instance = None
+
+            result = tool._validate_image_limits([small_image_path], "o3")
+            assert result is None  # Should pass (15MB < 20MB limit)
+
+            # Create 25MB image (over 20MB O3 limit)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
-                temp_file.write(b"\x00" * (150 * 1024 * 1024))  # 150MB
+                temp_file.write(b"\x00" * (25 * 1024 * 1024))  # 25MB
                 large_image_path = temp_file.name
 
-            result = tool._validate_image_limits([large_image_path], "gemini-2.5-flash")
-            # Large images should fail validation
-            assert result is not None
+            result = tool._validate_image_limits([large_image_path], "o3")
+            assert result is not None  # Should fail (25MB > 20MB limit)
             assert result["status"] == "error"
             assert "Image size limit exceeded" in result["content"]
+            assert "20.0MB" in result["content"]  # O3 limit
+            assert "25.0MB" in result["content"]  # Provided size
 
         finally:
             # Clean up temp files
@@ -235,6 +257,17 @@ class TestImageSupportIntegration:
                 os.unlink(small_image_path)
             if large_image_path and os.path.exists(large_image_path):
                 os.unlink(large_image_path)
+
+            # Restore environment
+            for key, value in original_env.items():
+                if value is not None:
+                    os.environ[key] = value
+                else:
+                    os.environ.pop(key, None)
+
+            # Reload config and clear registry
+            importlib.reload(config)
+            ModelProviderRegistry._instance = None
 
     @pytest.mark.asyncio
     async def test_chat_tool_execution_with_images(self):
@@ -315,11 +348,11 @@ class TestImageSupportIntegration:
             importlib.reload(config)
             ModelProviderRegistry._instance = None
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_cross_tool_image_context_preservation(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_cross_tool_image_context_preservation(self, mock_redis):
         """Test that images are preserved across different tools in conversation."""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         # Mock the Redis operations to return success
         mock_client.set.return_value = True
@@ -410,7 +443,7 @@ class TestImageSupportIntegration:
 
     def test_tool_request_base_class_has_images(self):
         """Test that base ToolRequest class includes images field."""
-        from tools.shared.base_models import ToolRequest
+        from tools.base import ToolRequest
 
         # Create request with images
         request = ToolRequest(images=["test.png", "test2.jpg"])
@@ -422,24 +455,59 @@ class TestImageSupportIntegration:
 
     def test_data_url_image_format_support(self):
         """Test that tools can handle data URL format images."""
+        import importlib
+
         tool = ChatTool()
 
         # Test with data URL (base64 encoded 1x1 transparent PNG)
         data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
         images = [data_url]
 
-        # Test with a dummy model that doesn't exist in any provider
-        result = tool._validate_image_limits(images, "test-dummy-model-name")
-        # Should return error because model not available or doesn't support images
-        assert result is not None
-        assert result["status"] == "error"
-        assert "is not available" in result["content"] or "does not support image processing" in result["content"]
+        # Save original environment
+        original_env = {
+            "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY"),
+            "DEFAULT_MODEL": os.environ.get("DEFAULT_MODEL"),
+        }
 
-        # Test with another non-existent model to check error handling
-        result = tool._validate_image_limits(images, "another-dummy-model")
-        # Should return error because model not available
-        assert result is not None
-        assert result["status"] == "error"
+        try:
+            # Set up environment for OpenAI provider
+            os.environ["OPENAI_API_KEY"] = "test-key-data-url-test-not-real"
+            os.environ["DEFAULT_MODEL"] = "o3"
+
+            # Clear other provider keys to isolate to OpenAI
+            for key in ["GEMINI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY"]:
+                os.environ.pop(key, None)
+
+            # Reload config and clear registry
+            import config
+
+            importlib.reload(config)
+            from providers.registry import ModelProviderRegistry
+
+            ModelProviderRegistry._instance = None
+
+            # Use a model that should be available - o3 from OpenAI
+            result = tool._validate_image_limits(images, "o3")
+            assert result is None  # Small data URL should pass validation
+
+            # Also test with a non-vision model to ensure validation works
+            result = tool._validate_image_limits(images, "mistral-large")
+            # This should fail because model not available with current setup
+            assert result is not None
+            assert result["status"] == "error"
+            assert "does not support image processing" in result["content"]
+
+        finally:
+            # Restore environment
+            for key, value in original_env.items():
+                if value is not None:
+                    os.environ[key] = value
+                else:
+                    os.environ.pop(key, None)
+
+            # Reload config and clear registry
+            importlib.reload(config)
+            ModelProviderRegistry._instance = None
 
     def test_empty_images_handling(self):
         """Test that tools handle empty images lists gracefully."""
@@ -453,11 +521,11 @@ class TestImageSupportIntegration:
         result = tool._validate_image_limits(None, "test_model")
         assert result is None
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_conversation_memory_thread_chaining_with_images(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_conversation_memory_thread_chaining_with_images(self, mock_redis):
         """Test that images work correctly with conversation thread chaining."""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         # Mock the Redis operations to return success
         mock_client.set.return_value = True
@@ -483,14 +551,14 @@ class TestImageSupportIntegration:
             tool_name="chat",
         )
 
-        # Create child thread linked to parent using a simple tool
-        child_thread_id = create_thread("chat", {"prompt": "child context"}, parent_thread_id=parent_thread_id)
+        # Create child thread linked to parent
+        child_thread_id = create_thread("debug", {"child": "context"}, parent_thread_id=parent_thread_id)
         add_turn(
             thread_id=child_thread_id,
             role="user",
             content="Child thread with more images",
             images=["child1.png", "shared.png"],  # shared.png appears again (should prioritize newer)
-            tool_name="chat",
+            tool_name="debug",
         )
 
         # Mock child thread context for get_thread call

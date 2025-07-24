@@ -7,7 +7,7 @@ from .base import (
     ModelCapabilities,
     ModelResponse,
     ProviderType,
-    create_temperature_constraint,
+    RangeTemperatureConstraint,
 )
 from .openai_compatible import OpenAICompatibleProvider
 
@@ -19,44 +19,21 @@ class XAIModelProvider(OpenAICompatibleProvider):
 
     FRIENDLY_NAME = "X.AI"
 
-    # Model configurations using ModelCapabilities objects
+    # Model configurations
     SUPPORTED_MODELS = {
-        "grok-3": ModelCapabilities(
-            provider=ProviderType.XAI,
-            model_name="grok-3",
-            friendly_name="X.AI (Grok 3)",
-            context_window=131_072,  # 131K tokens
-            max_output_tokens=131072,
-            supports_extended_thinking=False,
-            supports_system_prompts=True,
-            supports_streaming=True,
-            supports_function_calling=True,
-            supports_json_mode=False,  # Assuming GROK doesn't have JSON mode yet
-            supports_images=False,  # Assuming GROK is text-only for now
-            max_image_size_mb=0.0,
-            supports_temperature=True,
-            temperature_constraint=create_temperature_constraint("range"),
-            description="GROK-3 (131K context) - Advanced reasoning model from X.AI, excellent for complex analysis",
-            aliases=["grok", "grok3"],
-        ),
-        "grok-3-fast": ModelCapabilities(
-            provider=ProviderType.XAI,
-            model_name="grok-3-fast",
-            friendly_name="X.AI (Grok 3 Fast)",
-            context_window=131_072,  # 131K tokens
-            max_output_tokens=131072,
-            supports_extended_thinking=False,
-            supports_system_prompts=True,
-            supports_streaming=True,
-            supports_function_calling=True,
-            supports_json_mode=False,  # Assuming GROK doesn't have JSON mode yet
-            supports_images=False,  # Assuming GROK is text-only for now
-            max_image_size_mb=0.0,
-            supports_temperature=True,
-            temperature_constraint=create_temperature_constraint("range"),
-            description="GROK-3 Fast (131K context) - Higher performance variant, faster processing but more expensive",
-            aliases=["grok3fast", "grokfast", "grok3-fast"],
-        ),
+        "grok-3": {
+            "context_window": 131_072,  # 131K tokens
+            "supports_extended_thinking": False,
+        },
+        "grok-3-fast": {
+            "context_window": 131_072,  # 131K tokens
+            "supports_extended_thinking": False,
+        },
+        # Shorthands for convenience
+        "grok": "grok-3",  # Default to grok-3
+        "grok3": "grok-3",
+        "grok3fast": "grok-3-fast",
+        "grokfast": "grok-3-fast",
     }
 
     def __init__(self, api_key: str, **kwargs):
@@ -70,7 +47,7 @@ class XAIModelProvider(OpenAICompatibleProvider):
         # Resolve shorthand
         resolved_name = self._resolve_model_name(model_name)
 
-        if resolved_name not in self.SUPPORTED_MODELS:
+        if resolved_name not in self.SUPPORTED_MODELS or isinstance(self.SUPPORTED_MODELS[resolved_name], str):
             raise ValueError(f"Unsupported X.AI model: {model_name}")
 
         # Check if model is allowed by restrictions
@@ -80,8 +57,23 @@ class XAIModelProvider(OpenAICompatibleProvider):
         if not restriction_service.is_allowed(ProviderType.XAI, resolved_name, model_name):
             raise ValueError(f"X.AI model '{model_name}' is not allowed by restriction policy.")
 
-        # Return the ModelCapabilities object directly from SUPPORTED_MODELS
-        return self.SUPPORTED_MODELS[resolved_name]
+        config = self.SUPPORTED_MODELS[resolved_name]
+
+        # Define temperature constraints for GROK models
+        # GROK supports the standard OpenAI temperature range
+        temp_constraint = RangeTemperatureConstraint(0.0, 2.0, 0.7)
+
+        return ModelCapabilities(
+            provider=ProviderType.XAI,
+            model_name=resolved_name,
+            friendly_name=self.FRIENDLY_NAME,
+            context_window=config["context_window"],
+            supports_extended_thinking=config["supports_extended_thinking"],
+            supports_system_prompts=True,
+            supports_streaming=True,
+            supports_function_calling=True,
+            temperature_constraint=temp_constraint,
+        )
 
     def get_provider_type(self) -> ProviderType:
         """Get the provider type."""
@@ -92,7 +84,7 @@ class XAIModelProvider(OpenAICompatibleProvider):
         resolved_name = self._resolve_model_name(model_name)
 
         # First check if model is supported
-        if resolved_name not in self.SUPPORTED_MODELS:
+        if resolved_name not in self.SUPPORTED_MODELS or not isinstance(self.SUPPORTED_MODELS[resolved_name], dict):
             return False
 
         # Then check if model is allowed by restrictions
@@ -133,3 +125,11 @@ class XAIModelProvider(OpenAICompatibleProvider):
         # Currently GROK models do not support extended thinking
         # This may change with future GROK model releases
         return False
+
+    def _resolve_model_name(self, model_name: str) -> str:
+        """Resolve model shorthand to full name."""
+        # Check if it's a shorthand
+        shorthand_value = self.SUPPORTED_MODELS.get(model_name)
+        if isinstance(shorthand_value, str):
+            return shorthand_value
+        return model_name

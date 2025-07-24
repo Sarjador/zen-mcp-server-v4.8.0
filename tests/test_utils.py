@@ -29,14 +29,12 @@ class TestFileUtils:
         assert "Error: File does not exist" in content
         assert tokens > 0
 
-    def test_read_file_content_safe_files_allowed(self):
-        """Test that safe files outside the original project root are now allowed"""
-        # In the new security model, safe files like /etc/passwd
-        # can be read as they're not in the dangerous paths list
+    def test_read_file_content_outside_project_root(self):
+        """Test that paths outside project root are rejected"""
+        # Try to read a file outside the project root
         content, tokens = read_file_content("/etc/passwd")
-        # Should successfully read the file
-        assert "--- BEGIN FILE: /etc/passwd ---" in content
-        assert "--- END FILE: /etc/passwd ---" in content
+        assert "--- ERROR ACCESSING FILE:" in content
+        assert "Path outside workspace" in content
         assert tokens > 0
 
     def test_read_file_content_relative_path_rejected(self):

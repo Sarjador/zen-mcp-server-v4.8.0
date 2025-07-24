@@ -24,6 +24,8 @@ class ModelProviderRegistry:
             cls._instance._providers = {}
             cls._instance._initialized_providers = {}
             logging.debug(f"REGISTRY: Created instance {cls._instance}")
+        else:
+            logging.debug(f"REGISTRY: Returning existing instance {cls._instance}")
         return cls._instance
 
     @classmethod
@@ -103,7 +105,7 @@ class ModelProviderRegistry:
         3. OPENROUTER - Catch-all for cloud models via unified API
 
         Args:
-            model_name: Name of the model (e.g., "gemini-2.5-flash", "o3-mini")
+            model_name: Name of the model (e.g., "gemini-2.5-flash-preview-05-20", "o3-mini")
 
         Returns:
             ModelProvider instance that supports this model
@@ -116,7 +118,6 @@ class ModelProviderRegistry:
             ProviderType.GOOGLE,  # Direct Gemini access
             ProviderType.OPENAI,  # Direct OpenAI access
             ProviderType.XAI,  # Direct X.AI GROK access
-            ProviderType.DIAL,  # DIAL unified API access
             ProviderType.CUSTOM,  # Local/self-hosted models
             ProviderType.OPENROUTER,  # Catch-all for cloud models
         ]
@@ -127,6 +128,7 @@ class ModelProviderRegistry:
         logging.debug(f"Available providers in registry: {list(instance._providers.keys())}")
 
         for provider_type in PROVIDER_PRIORITY_ORDER:
+            logging.debug(f"Checking provider_type: {provider_type}")
             if provider_type in instance._providers:
                 logging.debug(f"Found {provider_type} in registry")
                 # Get or create provider instance
@@ -158,43 +160,46 @@ class ModelProviderRegistry:
         Returns:
             Dict mapping model names to provider types
         """
+        models = {}
+        instance = cls()
+
         # Import here to avoid circular imports
         from utils.model_restrictions import get_restriction_service
 
         restriction_service = get_restriction_service() if respect_restrictions else None
-        models: dict[str, ProviderType] = {}
-        instance = cls()
 
         for provider_type in instance._providers:
             provider = cls.get_provider(provider_type)
-            if not provider:
-                continue
+            if provider:
+                # Get supported models based on provider type
+                if hasattr(provider, "SUPPORTED_MODELS"):
+                    for model_name, config in provider.SUPPORTED_MODELS.items():
+                        # Handle both base models (dict configs) and aliases (string values)
+                        if isinstance(config, str):
+                            # This is an alias - check if the target model would be allowed
+                            target_model = config
+                            if restriction_service and not restriction_service.is_allowed(provider_type, target_model):
+                                logging.debug(f"Alias {model_name} -> {target_model} filtered by restrictions")
+                                continue
+                            # Allow the alias
+                            models[model_name] = provider_type
+                        else:
+                            # This is a base model with config dict
+                            # Check restrictions if enabled
+                            if restriction_service and not restriction_service.is_allowed(provider_type, model_name):
+                                logging.debug(f"Model {model_name} filtered by restrictions")
+                                continue
+                            models[model_name] = provider_type
+                elif provider_type == ProviderType.OPENROUTER:
+                    # OpenRouter uses a registry system instead of SUPPORTED_MODELS
+                    if hasattr(provider, "_registry") and provider._registry:
+                        for model_name in provider._registry.list_models():
+                            # Check restrictions if enabled
+                            if restriction_service and not restriction_service.is_allowed(provider_type, model_name):
+                                logging.debug(f"Model {model_name} filtered by restrictions")
+                                continue
 
-            try:
-                available = provider.list_models(respect_restrictions=respect_restrictions)
-            except NotImplementedError:
-                logging.warning("Provider %s does not implement list_models", provider_type)
-                continue
-
-            for model_name in available:
-                # =====================================================================================
-                # CRITICAL: Prevent double restriction filtering (Fixed Issue #98)
-                # =====================================================================================
-                # Previously, both the provider AND registry applied restrictions, causing
-                # double-filtering that resulted in "no models available" errors.
-                #
-                # Logic: If respect_restrictions=True, provider already filtered models,
-                # so registry should NOT filter them again.
-                # TEST COVERAGE: tests/test_provider_routing_bugs.py::TestOpenRouterAliasRestrictions
-                # =====================================================================================
-                if (
-                    restriction_service
-                    and not respect_restrictions  # Only filter if provider didn't already filter
-                    and not restriction_service.is_allowed(provider_type, model_name)
-                ):
-                    logging.debug("Model %s filtered by restrictions", model_name)
-                    continue
-                models[model_name] = provider_type
+                            models[model_name] = provider_type
 
         return models
 
@@ -235,7 +240,6 @@ class ModelProviderRegistry:
             ProviderType.XAI: "XAI_API_KEY",
             ProviderType.OPENROUTER: "OPENROUTER_API_KEY",
             ProviderType.CUSTOM: "CUSTOM_API_KEY",  # Can be empty for providers that don't need auth
-            ProviderType.DIAL: "DIAL_API_KEY",
         }
 
         env_var = key_mapping.get(provider_type)
@@ -270,13 +274,11 @@ class ModelProviderRegistry:
         gemini_models = [m for m, p in available_models.items() if p == ProviderType.GOOGLE]
         xai_models = [m for m, p in available_models.items() if p == ProviderType.XAI]
         openrouter_models = [m for m, p in available_models.items() if p == ProviderType.OPENROUTER]
-        custom_models = [m for m, p in available_models.items() if p == ProviderType.CUSTOM]
 
         openai_available = bool(openai_models)
         gemini_available = bool(gemini_models)
         xai_available = bool(xai_models)
         openrouter_available = bool(openrouter_models)
-        custom_available = bool(custom_models)
 
         if tool_category == ToolModelCategory.EXTENDED_REASONING:
             # Prefer thinking-capable models for deep reasoning tools
@@ -303,12 +305,9 @@ class ModelProviderRegistry:
                     return thinking_model
                 # Fallback to first available OpenRouter model
                 return openrouter_models[0]
-            elif custom_available:
-                # Fallback to custom models when available
-                return custom_models[0]
             else:
                 # Fallback to pro if nothing found
-                return "gemini-2.5-pro"
+                return "gemini-2.5-pro-preview-06-05"
 
         elif tool_category == ToolModelCategory.FAST_RESPONSE:
             # Prefer fast, cost-efficient models
@@ -326,23 +325,16 @@ class ModelProviderRegistry:
                 return xai_models[0]
             elif gemini_available and any("flash" in m for m in gemini_models):
                 # Find the flash model (handles full names)
-                # Prefer 2.5 over 2.0 for backward compatibility
-                flash_models = [m for m in gemini_models if "flash" in m]
-                # Sort to ensure 2.5 comes before 2.0
-                flash_models_sorted = sorted(flash_models, reverse=True)
-                return flash_models_sorted[0]
+                return next(m for m in gemini_models if "flash" in m)
             elif gemini_available and gemini_models:
                 # Fall back to any available Gemini model
                 return gemini_models[0]
             elif openrouter_available:
                 # Fallback to first available OpenRouter model
                 return openrouter_models[0]
-            elif custom_available:
-                # Fallback to custom models when available
-                return custom_models[0]
             else:
                 # Default to flash
-                return "gemini-2.5-flash"
+                return "gemini-2.5-flash-preview-05-20"
 
         # BALANCED or no category specified - use existing balanced logic
         if openai_available and "o4-mini" in openai_models:
@@ -356,24 +348,18 @@ class ModelProviderRegistry:
         elif xai_available and xai_models:
             return xai_models[0]
         elif gemini_available and any("flash" in m for m in gemini_models):
-            # Prefer 2.5 over 2.0 for backward compatibility
-            flash_models = [m for m in gemini_models if "flash" in m]
-            flash_models_sorted = sorted(flash_models, reverse=True)
-            return flash_models_sorted[0]
+            return next(m for m in gemini_models if "flash" in m)
         elif gemini_available and gemini_models:
             return gemini_models[0]
         elif openrouter_available:
             return openrouter_models[0]
-        elif custom_available:
-            # Fallback to custom models when available
-            return custom_models[0]
         else:
             # No models available due to restrictions - check if any providers exist
             if not available_models:
                 # This might happen if all models are restricted
                 logging.warning("No models available due to restrictions")
             # Return a reasonable default for backward compatibility
-            return "gemini-2.5-flash"
+            return "gemini-2.5-flash-preview-05-20"
 
     @classmethod
     def _find_extended_thinking_model(cls) -> Optional[str]:
@@ -401,9 +387,9 @@ class ModelProviderRegistry:
         if openrouter_provider:
             # Prefer models known for deep reasoning
             preferred_models = [
-                "anthropic/claude-sonnet-4",
-                "anthropic/claude-opus-4",
-                "google/gemini-2.5-pro",
+                "anthropic/claude-3.5-sonnet",
+                "anthropic/claude-3-opus-20240229",
+                "google/gemini-2.5-pro-preview-06-05",
                 "google/gemini-pro-1.5",
                 "meta-llama/llama-3.1-70b-instruct",
                 "mistralai/mixtral-8x7b-instruct",

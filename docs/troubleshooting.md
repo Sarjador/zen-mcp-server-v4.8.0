@@ -24,7 +24,7 @@ claude.exe --debug
 
 Look for error messages in the console output, especially:
 - API key errors
-- Python/environment issues
+- Docker connection issues
 - File permission errors
 
 ### 3. Verify API Keys
@@ -40,72 +40,60 @@ cat .env
 # OPENAI_API_KEY=your-key-here
 ```
 
-If you need to update your API keys, edit the `.env` file and then restart Claude for changes to take effect.
-
-### 4. Check Server Logs
-
-View the server logs for detailed error information:
+If you need to update your API keys, edit the `.env` file and then run:
 
 ```bash
-# View recent logs
-tail -n 100 logs/mcp_server.log
+# Restart services
+./run-server.sh
 
-# Follow logs in real-time
-tail -f logs/mcp_server.log
+# Or restart and follow logs for troubleshooting
+./run-server.sh -f
+```
+
+This will validate your configuration and restart the services.
+
+### 4. Check Docker Logs
+
+View the container logs for detailed error information:
+
+```bash
+# Check if containers are running
+docker-compose ps
+
+# View MCP server logs (recommended - shows actual tool execution)
+docker exec zen-mcp-server tail -f -n 500 /tmp/mcp_server.log
 
 # Or use the -f flag when starting to automatically follow logs
 ./run-server.sh -f
-
-# Search for errors
-grep "ERROR" logs/mcp_server.log
 ```
+
+**Note**: Due to MCP protocol limitations, `docker-compose logs` only shows startup logs, not tool execution logs. Always use the docker exec command above or the `-f` flag for debugging.
 
 See [Logging Documentation](logging.md) for more details on accessing logs.
 
 ### 5. Common Issues
 
 **"Connection failed" in Claude Desktop**
-- Ensure the server path is correct in your Claude config
-- Run `./run-server.sh` to verify setup and see configuration
-- Check that Python is installed: `python3 --version`
+- Ensure Docker is running: `docker ps`
+- Restart services: `docker-compose restart`
 
 **"API key environment variable is required"**
 - Add your API key to the `.env` file
-- Restart Claude Desktop after updating `.env`
+- Run: `./run-server.sh` to validate and restart
 
 **File path errors**
 - Always use absolute paths: `/Users/you/project/file.py`
 - Never use relative paths: `./file.py`
 
-**Python module not found**
-- Run `./run-server.sh` to reinstall dependencies
-- Check virtual environment is activated: should see `.zen_venv` in the Python path
-
-### 6. Environment Issues
-
-**Virtual Environment Problems**
-```bash
-# Reset environment completely
-rm -rf .zen_venv
-./run-server.sh
-```
-
-**Permission Issues**
-```bash
-# Ensure script is executable
-chmod +x run-server.sh
-```
-
-### 7. Still Having Issues?
+### 6. Still Having Issues?
 
 If the problem persists after trying these steps:
 
 1. **Reproduce the issue** - Note the exact steps that cause the problem
-2. **Collect logs** - Save relevant error messages from Claude debug mode and server logs
+2. **Collect logs** - Save relevant error messages from Claude debug mode and Docker logs
 3. **Open a GitHub issue** with:
    - Your operating system
-   - Python version: `python3 --version`
-   - Error messages from logs
+   - Error messages
    - Steps to reproduce
    - What you've already tried
 

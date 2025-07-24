@@ -26,11 +26,11 @@ from utils.conversation_memory import (
 class TestConversationMemory:
     """Test the conversation memory system for stateless MCP requests"""
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_create_thread(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_create_thread(self, mock_redis):
         """Test creating a new thread"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         thread_id = create_thread("chat", {"prompt": "Hello", "files": ["/test.py"]})
 
@@ -43,11 +43,11 @@ class TestConversationMemory:
         assert call_args[0][0] == f"thread:{thread_id}"  # key
         assert call_args[0][1] == CONVERSATION_TIMEOUT_SECONDS  # TTL from configuration
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_get_thread_valid(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_get_thread_valid(self, mock_redis):
         """Test retrieving an existing thread"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         test_uuid = "12345678-1234-1234-1234-123456789012"
 
@@ -69,27 +69,27 @@ class TestConversationMemory:
         assert context.tool_name == "chat"
         mock_client.get.assert_called_once_with(f"thread:{test_uuid}")
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_get_thread_invalid_uuid(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_get_thread_invalid_uuid(self, mock_redis):
         """Test handling invalid UUID"""
         context = get_thread("invalid-uuid")
         assert context is None
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_get_thread_not_found(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_get_thread_not_found(self, mock_redis):
         """Test handling thread not found"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
         mock_client.get.return_value = None
 
         context = get_thread("12345678-1234-1234-1234-123456789012")
         assert context is None
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_add_turn_success(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_add_turn_success(self, mock_redis):
         """Test adding a turn to existing thread"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         test_uuid = "12345678-1234-1234-1234-123456789012"
 
@@ -111,11 +111,11 @@ class TestConversationMemory:
         mock_client.get.assert_called_once()
         mock_client.setex.assert_called_once()
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_add_turn_max_limit(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_add_turn_max_limit(self, mock_redis):
         """Test turn limit enforcement"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         test_uuid = "12345678-1234-1234-1234-123456789012"
 
@@ -237,11 +237,11 @@ class TestConversationMemory:
 class TestConversationFlow:
     """Test complete conversation flows simulating stateless MCP requests"""
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_complete_conversation_cycle(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_complete_conversation_cycle(self, mock_redis):
         """Test a complete 5-turn conversation until limit reached"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         # Simulate independent MCP request cycles
 
@@ -341,13 +341,13 @@ class TestConversationFlow:
         success = add_turn(thread_id, "user", "This should be rejected")
         assert success is False  # CONVERSATION STOPS HERE
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_invalid_continuation_id_error(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_invalid_continuation_id_error(self, mock_redis):
         """Test that invalid continuation IDs raise proper error for restart"""
         from server import reconstruct_thread_context
 
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
         mock_client.get.return_value = None  # Thread not found
 
         arguments = {"continuation_id": "invalid-uuid-12345", "prompt": "Continue conversation"}
@@ -439,11 +439,11 @@ class TestConversationFlow:
         expected_remaining = MAX_CONVERSATION_TURNS - 1
         assert f"({expected_remaining} exchanges remaining)" in instructions
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_complete_conversation_with_dynamic_turns(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_complete_conversation_with_dynamic_turns(self, mock_redis):
         """Test complete conversation respecting MAX_CONVERSATION_TURNS dynamically"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         thread_id = create_thread("chat", {"prompt": "Start conversation"})
 
@@ -495,26 +495,26 @@ class TestConversationFlow:
         success = add_turn(thread_id, "user", "This should fail")
         assert success is False, f"Turn {MAX_CONVERSATION_TURNS + 1} should fail"
 
-    @patch("utils.conversation_memory.get_storage")
+    @patch("utils.conversation_memory.get_redis_client")
     @patch.dict(os.environ, {"GEMINI_API_KEY": "test-key", "OPENAI_API_KEY": ""}, clear=False)
-    def test_conversation_with_files_and_context_preservation(self, mock_storage):
+    def test_conversation_with_files_and_context_preservation(self, mock_redis):
         """Test complete conversation flow with file tracking and context preservation"""
         from providers.registry import ModelProviderRegistry
 
         ModelProviderRegistry.clear_cache()
 
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
-        # Start conversation with files using a simple tool
-        thread_id = create_thread("chat", {"prompt": "Analyze this codebase", "files": ["/project/src/"]})
+        # Start conversation with files
+        thread_id = create_thread("analyze", {"prompt": "Analyze this codebase", "files": ["/project/src/"]})
 
         # Turn 1: Claude provides context with multiple files
         initial_context = ThreadContext(
             thread_id=thread_id,
             created_at="2023-01-01T00:00:00Z",
             last_updated_at="2023-01-01T00:00:00Z",
-            tool_name="chat",
+            tool_name="analyze",
             turns=[],
             initial_context={"prompt": "Analyze this codebase", "files": ["/project/src/"]},
         )
@@ -545,7 +545,7 @@ class TestConversationFlow:
                     tool_name="analyze",
                 )
             ],
-            initial_context={"prompt": "Analyze this codebase", "relevant_files": ["/project/src/"]},
+            initial_context={"prompt": "Analyze this codebase", "files": ["/project/src/"]},
         )
         mock_client.get.return_value = context_turn_1.model_dump_json()
 
@@ -576,7 +576,7 @@ class TestConversationFlow:
                     files=["/project/tests/", "/project/test_main.py"],
                 ),
             ],
-            initial_context={"prompt": "Analyze this codebase", "relevant_files": ["/project/src/"]},
+            initial_context={"prompt": "Analyze this codebase", "files": ["/project/src/"]},
         )
         mock_client.get.return_value = context_turn_2.model_dump_json()
 
@@ -617,7 +617,7 @@ class TestConversationFlow:
                     tool_name="analyze",
                 ),
             ],
-            initial_context={"prompt": "Analyze this codebase", "relevant_files": ["/project/src/"]},
+            initial_context={"prompt": "Analyze this codebase", "files": ["/project/src/"]},
         )
 
         history, tokens = build_conversation_history(final_context)
@@ -648,11 +648,11 @@ class TestConversationFlow:
 
         assert turn_1_pos < turn_2_pos < turn_3_pos
 
-    @patch("utils.conversation_memory.get_storage")
-    def test_stateless_request_isolation(self, mock_storage):
+    @patch("utils.conversation_memory.get_redis_client")
+    def test_stateless_request_isolation(self, mock_redis):
         """Test that each request cycle is independent but shares context via Redis"""
         mock_client = Mock()
-        mock_storage.return_value = mock_client
+        mock_redis.return_value = mock_client
 
         # Simulate two different "processes" accessing same thread
         thread_id = "12345678-1234-1234-1234-123456789012"

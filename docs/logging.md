@@ -11,59 +11,49 @@ The easiest way to monitor logs is to use the `-f` flag when starting the server
 
 This will start the server and immediately begin tailing the MCP server logs.
 
-## Log Files
+## Viewing Logs in Docker
 
-Logs are stored in the `logs/` directory within your project folder:
-
-- **`mcp_server.log`** - Main server operations, API calls, and errors
-- **`mcp_activity.log`** - Tool calls and conversation tracking
-
-Log files rotate automatically when they reach 20MB, keeping up to 10 rotated files.
-
-## Viewing Logs
-
-To monitor MCP server activity:
+To monitor MCP server activity in real-time:
 
 ```bash
-# Follow logs in real-time
-tail -f logs/mcp_server.log
+# Follow MCP server logs (recommended)
+docker exec zen-mcp-server tail -f -n 500 /tmp/mcp_server.log
 
-# View last 100 lines
-tail -n 100 logs/mcp_server.log
+# Or use the -f flag when starting the server
+./run-server.sh -f
+```
 
-# View activity logs (tool calls only)
-tail -f logs/mcp_activity.log
+**Note**: Due to MCP protocol limitations, container logs don't show tool execution details. Always use the commands above for debugging.
 
-# Search for specific patterns
-grep "ERROR" logs/mcp_server.log
-grep "tool_name" logs/mcp_activity.log
+## Log Files
+
+Logs are stored in the container's `/tmp/` directory and rotate daily at midnight, keeping 7 days of history:
+
+- **`mcp_server.log`** - Main server operations
+- **`mcp_activity.log`** - Tool calls and conversations
+- **`mcp_server_overflow.log`** - Overflow protection for large logs
+
+## Accessing Log Files
+
+To access log files directly:
+
+```bash
+# Enter the container
+docker exec -it zen-mcp-server /bin/sh
+
+# View current logs
+cat /tmp/mcp_server.log
+cat /tmp/mcp_activity.log
+
+# View previous days (with date suffix)
+cat /tmp/mcp_server.log.2024-06-14
 ```
 
 ## Log Level
 
-Set verbosity with `LOG_LEVEL` in your `.env` file:
+Set verbosity with `LOG_LEVEL` in your `.env` file or docker-compose.yml:
 
-```env
-# Options: DEBUG, INFO, WARNING, ERROR
-LOG_LEVEL=INFO
+```yaml
+environment:
+  - LOG_LEVEL=DEBUG  # Options: DEBUG, INFO, WARNING, ERROR
 ```
-
-- **DEBUG**: Detailed information for debugging
-- **INFO**: General operational messages (default)
-- **WARNING**: Warning messages
-- **ERROR**: Only error messages
-
-## Log Format
-
-Logs use a standardized format with timestamps:
-
-```
-2024-06-14 10:30:45,123 - module.name - INFO - Message here
-```
-
-## Tips
-
-- Use `./run-server.sh -f` for the easiest log monitoring experience
-- Activity logs show only tool-related events for cleaner output
-- Main server logs include all operational details
-- Logs persist across server restarts

@@ -40,7 +40,7 @@ class CustomProvider(OpenAICompatibleProvider):
             api_key: API key for the custom endpoint. Can be empty string for
                     providers that don't require authentication (like Ollama).
                     Falls back to CUSTOM_API_KEY environment variable if not provided.
-            base_url: Base URL for the custom API endpoint (e.g., 'http://localhost:11434/v1').
+            base_url: Base URL for the custom API endpoint (e.g., 'http://host.docker.internal:11434/v1').
                      Falls back to CUSTOM_API_URL environment variable if not provided.
             **kwargs: Additional configuration passed to parent OpenAI-compatible provider
 
@@ -158,12 +158,10 @@ class CustomProvider(OpenAICompatibleProvider):
                 model_name=resolved_name,
                 friendly_name=f"{self.FRIENDLY_NAME} ({resolved_name})",
                 context_window=32_768,  # Conservative default
-                max_output_tokens=32_768,  # Conservative default max output
                 supports_extended_thinking=False,  # Most custom models don't support this
                 supports_system_prompts=True,
                 supports_streaming=True,
                 supports_function_calling=False,  # Conservative default
-                supports_temperature=True,  # Most custom models accept temperature parameter
                 temperature_constraint=RangeTemperatureConstraint(0.0, 2.0, 0.7),
             )
 
@@ -188,7 +186,7 @@ class CustomProvider(OpenAICompatibleProvider):
         Returns:
             True if model is intended for custom/local endpoint
         """
-        # logging.debug(f"Custom provider validating model: '{model_name}'")
+        logging.debug(f"Custom provider validating model: '{model_name}'")
 
         # Try to resolve through registry first
         config = self._registry.resolve(model_name)
@@ -196,12 +194,12 @@ class CustomProvider(OpenAICompatibleProvider):
             model_id = config.model_name
             # Use explicit is_custom flag for clean validation
             if config.is_custom:
-                logging.debug(f"... [Custom] Model '{model_name}' -> '{model_id}' validated via registry")
+                logging.debug(f"Model '{model_name}' -> '{model_id}' validated via registry (custom model)")
                 return True
             else:
                 # This is a cloud/OpenRouter model - CustomProvider should NOT handle these
                 # Let OpenRouter provider handle them instead
-                # logging.debug(f"... [Custom] Model '{model_name}' -> '{model_id}' not custom (defer to OpenRouter)")
+                logging.debug(f"Model '{model_name}' -> '{model_id}' rejected (cloud model, defer to OpenRouter)")
                 return False
 
         # Handle version tags for unknown models (e.g., "my-model:latest")
@@ -269,50 +267,12 @@ class CustomProvider(OpenAICompatibleProvider):
     def supports_thinking_mode(self, model_name: str) -> bool:
         """Check if the model supports extended thinking mode.
 
+        Most custom/local models don't support extended thinking.
+
         Args:
             model_name: Model to check
 
         Returns:
-            True if model supports thinking mode, False otherwise
+            False (custom models generally don't support thinking mode)
         """
-        # Check if model is in registry
-        config = self._registry.resolve(model_name) if self._registry else None
-        if config and config.is_custom:
-            # Trust the config from custom_models.json
-            return config.supports_extended_thinking
-
-        # Default to False for unknown models
         return False
-
-    def get_model_configurations(self) -> dict[str, ModelCapabilities]:
-        """Get model configurations from the registry.
-
-        For CustomProvider, we convert registry configurations to ModelCapabilities objects.
-
-        Returns:
-            Dictionary mapping model names to their ModelCapabilities objects
-        """
-
-        configs = {}
-
-        if self._registry:
-            # Get all models from registry
-            for model_name in self._registry.list_models():
-                # Only include custom models that this provider validates
-                if self.validate_model_name(model_name):
-                    config = self._registry.resolve(model_name)
-                    if config and config.is_custom:
-                        # Use ModelCapabilities directly from registry
-                        configs[model_name] = config
-
-        return configs
-
-    def get_all_model_aliases(self) -> dict[str, list[str]]:
-        """Get all model aliases from the registry.
-
-        Returns:
-            Dictionary mapping model names to their list of aliases
-        """
-        # Since aliases are now included in the configurations,
-        # we can use the base class implementation
-        return super().get_all_model_aliases()

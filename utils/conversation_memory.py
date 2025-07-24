@@ -3,29 +3,15 @@ Conversation Memory for AI-to-AI Multi-turn Discussions
 
 This module provides conversation persistence and context reconstruction for
 stateless MCP (Model Context Protocol) environments. It enables multi-turn
-conversations between Claude and Gemini by storing conversation state in memory
+conversations between Claude and Gemini by storing conversation state in Redis
 across independent request cycles.
-
-CRITICAL ARCHITECTURAL REQUIREMENT:
-This conversation memory system is designed for PERSISTENT MCP SERVER PROCESSES.
-It uses in-memory storage that persists only within a single Python process.
-
-⚠️  IMPORTANT: This system will NOT work correctly if MCP tool calls are made
-    as separate subprocess invocations (each subprocess starts with empty memory).
-
-    WORKING SCENARIO: Claude Desktop with persistent MCP server process
-    FAILING SCENARIO: Simulator tests calling server.py as individual subprocesses
-
-    Root cause of test failures: Each subprocess call loses the conversation
-    state from previous calls because memory is process-specific, not shared
-    across subprocess boundaries.
 
 ARCHITECTURE OVERVIEW:
 The MCP protocol is inherently stateless - each tool request is independent
 with no memory of previous interactions. This module bridges that gap by:
 
 1. Creating persistent conversation threads with unique UUIDs
-2. Storing complete conversation context (turns, files, metadata) in memory
+2. Storing complete conversation context (turns, files, metadata) in Redis
 3. Reconstructing conversation history when tools are called with continuation_id
 4. Supporting cross-tool continuation - seamlessly switch between different tools
    while maintaining full conversation context and file references
@@ -49,9 +35,9 @@ Key Features:
   most recent file context is preserved when token limits require exclusions.
 - Automatic turn limiting (20 turns max) to prevent runaway conversations
 - Context reconstruction for stateless request continuity
-- In-memory persistence with automatic expiration (3 hour TTL)
+- Redis-based persistence with automatic expiration (3 hour TTL)
 - Thread-safe operations for concurrent access
-- Graceful degradation when storage is unavailable
+- Graceful degradation when Redis is unavailable
 
 DUAL PRIORITIZATION STRATEGY (Files & Conversations):
 The conversation memory system implements sophisticated prioritization for both files and
@@ -159,7 +145,7 @@ class ConversationTurn(BaseModel):
         images: List of image paths referenced in this specific turn
         tool_name: Which tool generated this turn (for cross-tool tracking)
         model_provider: Provider used (e.g., "google", "openai")
-        model_name: Specific model used (e.g., "gemini-2.5-flash", "o3-mini")
+        model_name: Specific model used (e.g., "gemini-2.5-flash-preview-05-20", "o3-mini")
         model_metadata: Additional model-specific metadata (e.g., thinking mode, token usage)
     """
 
@@ -201,16 +187,26 @@ class ThreadContext(BaseModel):
     initial_context: dict[str, Any]  # Original request parameters
 
 
-def get_storage():
+def get_redis_client():
     """
-    Get in-memory storage backend for conversation persistence.
+    Get Redis client from environment configuration
+
+    Creates a Redis client using the REDIS_URL environment variable.
+    Defaults to localhost:6379/0 if not specified.
 
     Returns:
-        InMemoryStorage: Thread-safe in-memory storage backend
-    """
-    from .storage_backend import get_storage_backend
+        redis.Redis: Configured Redis client with decode_responses=True
 
-    return get_storage_backend()
+    Raises:
+        ValueError: If redis package is not installed
+    """
+    try:
+        import redis
+
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        return redis.from_url(redis_url, decode_responses=True)
+    except ImportError:
+        raise ValueError("redis package required. Install with: pip install redis")
 
 
 def create_thread(tool_name: str, initial_request: dict[str, Any], parent_thread_id: Optional[str] = None) -> str:
@@ -255,10 +251,10 @@ def create_thread(tool_name: str, initial_request: dict[str, Any], parent_thread
         initial_context=filtered_context,
     )
 
-    # Store in memory with configurable TTL to prevent indefinite accumulation
-    storage = get_storage()
+    # Store in Redis with configurable TTL to prevent indefinite accumulation
+    client = get_redis_client()
     key = f"thread:{thread_id}"
-    storage.setex(key, CONVERSATION_TIMEOUT_SECONDS, context.model_dump_json())
+    client.setex(key, CONVERSATION_TIMEOUT_SECONDS, context.model_dump_json())
 
     logger.debug(f"[THREAD] Created new thread {thread_id} with parent {parent_thread_id}")
 
@@ -267,7 +263,7 @@ def create_thread(tool_name: str, initial_request: dict[str, Any], parent_thread
 
 def get_thread(thread_id: str) -> Optional[ThreadContext]:
     """
-    Retrieve thread context from in-memory storage
+    Retrieve thread context from Redis
 
     Fetches complete conversation context for cross-tool continuation.
     This is the core function that enables tools to access conversation
@@ -282,22 +278,22 @@ def get_thread(thread_id: str) -> Optional[ThreadContext]:
 
     Security:
         - Validates UUID format to prevent injection attacks
-        - Handles storage connection failures gracefully
+        - Handles Redis connection failures gracefully
         - No error information leakage on failure
     """
     if not thread_id or not _is_valid_uuid(thread_id):
         return None
 
     try:
-        storage = get_storage()
+        client = get_redis_client()
         key = f"thread:{thread_id}"
-        data = storage.get(key)
+        data = client.get(key)
 
         if data:
             return ThreadContext.model_validate_json(data)
         return None
     except Exception:
-        # Silently handle errors to avoid exposing storage details
+        # Silently handle errors to avoid exposing Redis details
         return None
 
 
@@ -317,7 +313,8 @@ def add_turn(
 
     Appends a new conversation turn to an existing thread. This is the core
     function for building conversation history and enabling cross-tool
-    continuation. Each turn preserves the tool and model that generated it.
+    continuation. Each turn preserves the tool and model that generated it,
+    and tracks file reception order using atomic Redis counters.
 
     Args:
         thread_id: UUID of the conversation thread
@@ -327,7 +324,7 @@ def add_turn(
         images: Optional list of images referenced in this turn
         tool_name: Name of the tool adding this turn (for attribution)
         model_provider: Provider used (e.g., "google", "openai")
-        model_name: Specific model used (e.g., "gemini-2.5-flash", "o3-mini")
+        model_name: Specific model used (e.g., "gemini-2.5-flash-preview-05-20", "o3-mini")
         model_metadata: Additional model info (e.g., thinking mode, token usage)
 
     Returns:
@@ -336,7 +333,7 @@ def add_turn(
     Failure cases:
         - Thread doesn't exist or expired
         - Maximum turn limit reached
-        - Storage connection failure
+        - Redis connection failure
 
     Note:
         - Refreshes thread TTL to configured timeout on successful update
@@ -373,14 +370,14 @@ def add_turn(
     context.turns.append(turn)
     context.last_updated_at = datetime.now(timezone.utc).isoformat()
 
-    # Save back to storage and refresh TTL
+    # Save back to Redis and refresh TTL
     try:
-        storage = get_storage()
+        client = get_redis_client()
         key = f"thread:{thread_id}"
-        storage.setex(key, CONVERSATION_TIMEOUT_SECONDS, context.model_dump_json())  # Refresh TTL to configured timeout
+        client.setex(key, CONVERSATION_TIMEOUT_SECONDS, context.model_dump_json())  # Refresh TTL to configured timeout
         return True
     except Exception as e:
-        logger.debug(f"[FLOW] Failed to save turn to storage: {type(e).__name__}")
+        logger.debug(f"[FLOW] Failed to save turn to Redis: {type(e).__name__}")
         return False
 
 
@@ -594,9 +591,11 @@ def _plan_file_inclusion_by_size(all_files: list[str], max_file_tokens: int) -> 
 
     for file_path in all_files:
         try:
-            from utils.file_utils import estimate_file_tokens
+            from utils.file_utils import estimate_file_tokens, translate_path_for_environment
 
-            if os.path.exists(file_path) and os.path.isfile(file_path):
+            translated_path = translate_path_for_environment(file_path)
+
+            if os.path.exists(translated_path) and os.path.isfile(translated_path):
                 # Use centralized token estimation for consistency
                 estimated_tokens = estimate_file_tokens(file_path)
 
@@ -614,7 +613,7 @@ def _plan_file_inclusion_by_size(all_files: list[str], max_file_tokens: int) -> 
             else:
                 files_to_skip.append(file_path)
                 # More descriptive message for missing files
-                if not os.path.exists(file_path):
+                if not os.path.exists(translated_path):
                     logger.debug(
                         f"[FILES] Skipping {file_path} - file no longer exists (may have been moved/deleted since conversation)"
                     )
@@ -725,7 +724,7 @@ def build_conversation_history(context: ThreadContext, model_context=None, read_
     Performance Characteristics:
         - O(n) file collection with newest-first prioritization
         - Intelligent token budgeting prevents context window overflow
-        - In-memory persistence with automatic TTL management
+        - Redis-based persistence with automatic TTL management
         - Graceful degradation when files are inaccessible or too large
     """
     # Get the complete thread chain
@@ -852,7 +851,10 @@ def build_conversation_history(context: ThreadContext, model_context=None, read_
                     except Exception as e:
                         # More descriptive error handling for missing files
                         try:
-                            if not os.path.exists(file_path):
+                            from utils.file_utils import translate_path_for_environment
+
+                            translated_path = translate_path_for_environment(file_path)
+                            if not os.path.exists(translated_path):
                                 logger.info(
                                     f"File no longer accessible for conversation history: {file_path} - file was moved/deleted since conversation (marking as excluded)"
                                 )
@@ -882,7 +884,7 @@ def build_conversation_history(context: ThreadContext, model_context=None, read_
                     history_parts.append("(No accessible files found)")
                     logger.debug(f"[FILES] No accessible files found from {len(files_to_include)} planned files")
             else:
-                # Fallback to original read_files function
+                # Fallback to original read_files function for backward compatibility
                 files_content = read_files_func(all_files)
                 if files_content:
                     # Add token validation for the combined file content
@@ -938,10 +940,14 @@ def build_conversation_history(context: ThreadContext, model_context=None, read_
         turn_header += ") ---"
         turn_parts.append(turn_header)
 
-        # Get tool-specific formatting if available
-        # This includes file references and the actual content
-        tool_formatted_content = _get_tool_formatted_content(turn)
-        turn_parts.extend(tool_formatted_content)
+        # Add files context if present - but just reference which files were used
+        # (the actual contents are already embedded above)
+        if turn.files:
+            turn_parts.append(f"Files used in this turn: {', '.join(turn.files)}")
+            turn_parts.append("")  # Empty line for readability
+
+        # Add the actual content
+        turn_parts.append(turn.content)
 
         # Calculate tokens for this turn
         turn_content = "\n".join(turn_parts)
@@ -1011,68 +1017,6 @@ def build_conversation_history(context: ThreadContext, model_context=None, read_
     )
 
     return complete_history, total_conversation_tokens
-
-
-def _get_tool_formatted_content(turn: ConversationTurn) -> list[str]:
-    """
-    Get tool-specific formatting for a conversation turn.
-
-    This function attempts to use the tool's custom formatting method if available,
-    falling back to default formatting if the tool cannot be found or doesn't
-    provide custom formatting.
-
-    Args:
-        turn: The conversation turn to format
-
-    Returns:
-        list[str]: Formatted content lines for this turn
-    """
-    if turn.tool_name:
-        try:
-            # Dynamically import to avoid circular dependencies
-            from server import TOOLS
-
-            tool = TOOLS.get(turn.tool_name)
-            if tool:
-                # Use inheritance pattern - try to call the method directly
-                # If it doesn't exist or raises AttributeError, fall back to default
-                try:
-                    return tool.format_conversation_turn(turn)
-                except AttributeError:
-                    # Tool doesn't implement format_conversation_turn - use default
-                    pass
-        except Exception as e:
-            # Log but don't fail - fall back to default formatting
-            logger.debug(f"[HISTORY] Could not get tool-specific formatting for {turn.tool_name}: {e}")
-
-    # Default formatting
-    return _default_turn_formatting(turn)
-
-
-def _default_turn_formatting(turn: ConversationTurn) -> list[str]:
-    """
-    Default formatting for conversation turns.
-
-    This provides the standard formatting when no tool-specific
-    formatting is available.
-
-    Args:
-        turn: The conversation turn to format
-
-    Returns:
-        list[str]: Default formatted content lines
-    """
-    parts = []
-
-    # Add files context if present
-    if turn.files:
-        parts.append(f"Files used in this turn: {', '.join(turn.files)}")
-        parts.append("")  # Empty line for readability
-
-    # Add the actual content
-    parts.append(turn.content)
-
-    return parts
 
 
 def _is_valid_uuid(val: str) -> bool:

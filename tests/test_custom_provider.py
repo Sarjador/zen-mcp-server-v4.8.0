@@ -31,9 +31,8 @@ class TestCustomProvider:
 
     def test_provider_initialization_missing_url(self):
         """Test CustomProvider raises error when URL is missing."""
-        with patch.dict(os.environ, {"CUSTOM_API_URL": ""}, clear=False):
-            with pytest.raises(ValueError, match="Custom API URL must be provided"):
-                CustomProvider(api_key="test-key")
+        with pytest.raises(ValueError, match="Custom API URL must be provided"):
+            CustomProvider(api_key="test-key")
 
     def test_validate_model_names_always_true(self):
         """Test CustomProvider accepts any model name."""
@@ -45,32 +44,18 @@ class TestCustomProvider:
 
     def test_get_capabilities_from_registry(self):
         """Test get_capabilities returns registry capabilities when available."""
-        # Save original environment
-        original_env = os.environ.get("OPENROUTER_ALLOWED_MODELS")
+        provider = CustomProvider(api_key="test-key", base_url="http://localhost:11434/v1")
 
-        try:
-            # Clear any restrictions
-            os.environ.pop("OPENROUTER_ALLOWED_MODELS", None)
+        # Test with a model that should be in the registry (OpenRouter model)
+        capabilities = provider.get_capabilities("llama")
 
-            provider = CustomProvider(api_key="test-key", base_url="http://localhost:11434/v1")
+        assert capabilities.provider == ProviderType.OPENROUTER  # llama is an OpenRouter model (is_custom=false)
+        assert capabilities.context_window > 0
 
-            # Test with a model that should be in the registry (OpenRouter model)
-            capabilities = provider.get_capabilities("o3")  # o3 is an OpenRouter model
-
-            assert capabilities.provider == ProviderType.OPENROUTER  # o3 is an OpenRouter model (is_custom=false)
-            assert capabilities.context_window > 0
-
-            # Test with a custom model (is_custom=true)
-            capabilities = provider.get_capabilities("local-llama")
-            assert capabilities.provider == ProviderType.CUSTOM  # local-llama has is_custom=true
-            assert capabilities.context_window > 0
-
-        finally:
-            # Restore original environment
-            if original_env is None:
-                os.environ.pop("OPENROUTER_ALLOWED_MODELS", None)
-            else:
-                os.environ["OPENROUTER_ALLOWED_MODELS"] = original_env
+        # Test with a custom model (is_custom=true)
+        capabilities = provider.get_capabilities("local-llama")
+        assert capabilities.provider == ProviderType.CUSTOM  # local-llama has is_custom=true
+        assert capabilities.context_window > 0
 
     def test_get_capabilities_generic_fallback(self):
         """Test get_capabilities returns generic capabilities for unknown models."""

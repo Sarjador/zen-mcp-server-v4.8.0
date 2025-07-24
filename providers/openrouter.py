@@ -50,6 +50,14 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             aliases = self._registry.list_aliases()
             logging.info(f"OpenRouter loaded {len(models)} models with {len(aliases)} aliases")
 
+    def _parse_allowed_models(self) -> None:
+        """Override to disable environment-based allow-list.
+
+        OpenRouter model access is controlled via the OpenRouter dashboard,
+        not through environment variables.
+        """
+        return None
+
     def _resolve_model_name(self, model_name: str) -> str:
         """Resolve model aliases to OpenRouter model names.
 
@@ -101,7 +109,6 @@ class OpenRouterProvider(OpenAICompatibleProvider):
                 model_name=resolved_name,
                 friendly_name=self.FRIENDLY_NAME,
                 context_window=32_768,  # Conservative default context window
-                max_output_tokens=32_768,
                 supports_extended_thinking=False,
                 supports_system_prompts=True,
                 supports_streaming=True,
@@ -123,34 +130,16 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 
         As the catch-all provider, OpenRouter accepts any model name that wasn't
         handled by higher-priority providers. OpenRouter will validate based on
-        the API key's permissions and local restrictions.
+        the API key's permissions.
 
         Args:
             model_name: Model name to validate
 
         Returns:
-            True if model is allowed, False if restricted
+            Always True - OpenRouter is the catch-all provider
         """
-        # Check model restrictions if configured
-        from utils.model_restrictions import get_restriction_service
-
-        restriction_service = get_restriction_service()
-        if restriction_service:
-            # Check if model name itself is allowed
-            if restriction_service.is_allowed(self.get_provider_type(), model_name):
-                return True
-
-            # Also check aliases - model_name might be an alias
-            model_config = self._registry.resolve(model_name)
-            if model_config and model_config.aliases:
-                for alias in model_config.aliases:
-                    if restriction_service.is_allowed(self.get_provider_type(), alias):
-                        return True
-
-            # If restrictions are configured and model/alias not in allowed list, reject
-            return False
-
-        # No restrictions configured - accept any model name as the fallback provider
+        # Accept any model name - OpenRouter is the fallback provider
+        # Higher priority providers (native APIs, custom endpoints) get first chance
         return True
 
     def generate_content(
@@ -178,11 +167,6 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         # Resolve model alias to actual OpenRouter model name
         resolved_model = self._resolve_model_name(model_name)
 
-        # Always disable streaming for OpenRouter
-        # MCP doesn't use streaming, and this avoids issues with O3 model access
-        if "stream" not in kwargs:
-            kwargs["stream"] = False
-
         # Call parent method with resolved model name
         return super().generate_content(
             prompt=prompt,
@@ -206,105 +190,3 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             False (no OpenRouter models currently support thinking mode)
         """
         return False
-
-    def list_models(self, respect_restrictions: bool = True) -> list[str]:
-        """Return a list of model names supported by this provider.
-
-        Args:
-            respect_restrictions: Whether to apply provider-specific restriction logic.
-
-        Returns:
-            List of model names available from this provider
-        """
-        from utils.model_restrictions import get_restriction_service
-
-        restriction_service = get_restriction_service() if respect_restrictions else None
-        models = []
-
-        if self._registry:
-            for model_name in self._registry.list_models():
-                # =====================================================================================
-                # CRITICAL ALIAS-AWARE RESTRICTION CHECKING (Fixed Issue #98)
-                # =====================================================================================
-                # Previously, restrictions only checked full model names (e.g., "google/gemini-2.5-pro")
-                # but users specify aliases in OPENROUTER_ALLOWED_MODELS (e.g., "pro").
-                # This caused "no models available" error even with valid restrictions.
-                #
-                # Fix: Check both model name AND all aliases against restrictions
-                # TEST COVERAGE: tests/test_provider_routing_bugs.py::TestOpenRouterAliasRestrictions
-                # =====================================================================================
-                if restriction_service:
-                    # Get model config to check aliases as well
-                    model_config = self._registry.resolve(model_name)
-                    allowed = False
-
-                    # Check if model name itself is allowed
-                    if restriction_service.is_allowed(self.get_provider_type(), model_name):
-                        allowed = True
-
-                    # CRITICAL: Also check aliases - this fixes the alias restriction bug
-                    if not allowed and model_config and model_config.aliases:
-                        for alias in model_config.aliases:
-                            if restriction_service.is_allowed(self.get_provider_type(), alias):
-                                allowed = True
-                                break
-
-                    if not allowed:
-                        continue
-
-                models.append(model_name)
-
-        return models
-
-    def list_all_known_models(self) -> list[str]:
-        """Return all model names known by this provider, including alias targets.
-
-        Returns:
-            List of all model names and alias targets known by this provider
-        """
-        all_models = set()
-
-        if self._registry:
-            # Get all models and aliases from the registry
-            all_models.update(model.lower() for model in self._registry.list_models())
-            all_models.update(alias.lower() for alias in self._registry.list_aliases())
-
-            # For each alias, also add its target
-            for alias in self._registry.list_aliases():
-                config = self._registry.resolve(alias)
-                if config:
-                    all_models.add(config.model_name.lower())
-
-        return list(all_models)
-
-    def get_model_configurations(self) -> dict[str, ModelCapabilities]:
-        """Get model configurations from the registry.
-
-        For OpenRouter, we convert registry configurations to ModelCapabilities objects.
-
-        Returns:
-            Dictionary mapping model names to their ModelCapabilities objects
-        """
-        configs = {}
-
-        if self._registry:
-            # Get all models from registry
-            for model_name in self._registry.list_models():
-                # Only include models that this provider validates
-                if self.validate_model_name(model_name):
-                    config = self._registry.resolve(model_name)
-                    if config and not config.is_custom:  # Only OpenRouter models, not custom ones
-                        # Use ModelCapabilities directly from registry
-                        configs[model_name] = config
-
-        return configs
-
-    def get_all_model_aliases(self) -> dict[str, list[str]]:
-        """Get all model aliases from the registry.
-
-        Returns:
-            Dictionary mapping model names to their list of aliases
-        """
-        # Since aliases are now included in the configurations,
-        # we can use the base class implementation
-        return super().get_all_model_aliases()
